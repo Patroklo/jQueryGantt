@@ -951,8 +951,8 @@ Ganttalendar.prototype.synchHighlight = function () {
   //console.debug("synchHighlight",this.master.currentTask);
   if (this.master.currentTask ){
     // take care of collapsed rows
-    var ganttHighLighterPosition=this.master.editor.element.find(".taskEditRow:visible").index(this.master.currentTask.rowElement);
-    this.master.gantt.element.find(".ganttLinesSVG").removeClass("rowSelected").eq(ganttHighLighterPosition).addClass("rowSelected");
+    var ganttHighLighterPosition=this.master.editor.element.find("[class*=taskEditRow]:visible").index(this.master.currentTask.rowElement);
+    this.master.gantt.element.find("[class*=ganttLinesSVG]").removeClass("rowSelected").eq(ganttHighLighterPosition).addClass("rowSelected");
   } else {
     $(".rowSelected").removeClass("rowSelected"); // todo non c'era
   }
