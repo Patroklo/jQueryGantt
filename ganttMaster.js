@@ -20,6 +20,30 @@
  OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
  WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  */
+ 
+
+  Array.prototype.indexOf = function(elt /*, from*/)
+  {
+    var len = this.length >>> 0;
+
+    var from = Number(arguments[1]) || 0;
+    from = (from < 0)
+         ? Math.ceil(from)
+         : Math.floor(from);
+    if (from < 0)
+      from += len;
+
+    for (; from < len; from++)
+    {
+      if (from in this &&
+          this[from] === elt)
+        return from;
+    }
+    return -1;
+  };
+
+ 
+ 
 function GanttMaster() {
   this.tasks = [];
   this.deletedTaskIds = [];
@@ -776,8 +800,13 @@ GanttMaster.prototype.loadCollapsedTasks = function () {
   if (localStorage ) {
     if (localStorage.getObject("TWPGanttCollTasks"))
       collTasks = localStorage.getObject("TWPGanttCollTasks");
-    return collTasks;
   }
+  // IE11 throws an error if not changed the undefined into an array.
+  if (typeof collTasks === "undefined")
+  {
+    collTasks = [];
+  }
+  return collTasks;
 };
 
 GanttMaster.prototype.storeCollapsedTasks = function () {
