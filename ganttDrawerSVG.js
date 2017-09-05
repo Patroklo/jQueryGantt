@@ -19,1566 +19,1131 @@
  LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
  OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
  WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+
+ todo For compatibility with IE and SVGElements.getElementsByClassName not implemented changed every find starting from SVGElement (the other works fine)
+ .find(".classname"))  -> .find("[class*=classname])
  */
- 
+function Ganttalendar(zoom, startmillis, endMillis, master, minGanttSize) {
+  this.master = master; // is the a GantEditor instance
+  this.element; // is the jquery element containing gantt
 
-  Array.prototype.indexOf = function(elt /*, from*/)
-  {
-    var len = this.length >>> 0;
+  this.svg; // instance of svg object containing gantt
+  this.tasksGroup; //instance of svg group containing tasks
+  this.linksGroup; //instance of svg group containing links
 
-    var from = Number(arguments[1]) || 0;
-    from = (from < 0)
-         ? Math.ceil(from)
-         : Math.floor(from);
-    if (from < 0)
-      from += len;
+  this.zoom = zoom;
+  this.minGanttSize = minGanttSize;
+  this.includeToday = true; //when true today is always visible. If false boundaries comes from tasks periods
+  this.showCriticalPath = false; //when true critical path is highlighted
 
-    for (; from < len; from++)
-    {
-      if (from in this &&
-          this[from] === elt)
-        return from;
-    }
-    return -1;
-  };
+  this.zoomLevels = [ "d", "w","w2","w3", "m","m2", "q", "q2", "s", "y"];
 
- 
- 
-function GanttMaster() {
-  this.tasks = [];
-  this.deletedTaskIds = [];
-  this.links = [];
+  this.element = this.create(zoom, startmillis, endMillis);
 
-  this.editor; //element for editor
-  this.gantt; //element for gantt
-  this.splitter; //element for splitter
+  this.linkOnProgress = false; //set to true when creating a new link
 
-  this.isMultiRoot=false; // set to true in case of tasklist
+  this.rowHeight = 30; // todo get it from css?
+  this.taskHeight=20;
+  this.taskVertOffset=(this.rowHeight-this.taskHeight)/2;
 
-  this.workSpace;  // the original element used for containing everything
-  this.element; // editor and gantt box without buttons
-
-
-  this.resources; //list of resources
-  this.roles;  //list of roles
-
-  this.minEditableDate = 0;
-  this.maxEditableDate = Infinity;
-  this.set100OnClose=false;
-
-  this.fillWithEmptyLines=true; //when is used by widget it could be usefull to do not fill with empty lines
-
-  this.minRowsInEditor=30; // number of rows always visible in editor
-
-  this.permissions = {
-    canWriteOnParent: true,
-    canWrite: true,
-    canAdd: true,
-    canDelete: true,
-    canInOutdent: true,
-    canMoveUpDown: true,
-    canSeePopEdit: true,
-    canSeeFullEdit: true,
-    canSeeDep: true,
-    canSeeCriticalPath: true,
-    canAddIssue: false,
-    cannotCloseTaskIfIssueOpen: false
-  };
-
-  this.firstDayOfWeek = Date.firstDayOfWeek;
-  this.serverClientTimeOffset = 0;
-
-  this.currentTask; // task currently selected;
-
-  this.resourceUrl = "res/"; // URL to resources (images etc.)
-  this.__currentTransaction;  // a transaction object holds previous state during changes
-  this.__undoStack = [];
-  this.__redoStack = [];
-  this.__inUndoRedo = false; // a control flag to avoid Undo/Redo stacks reset when needed
-
-  var self = this;
 }
 
+Ganttalendar.prototype.zoomGantt = function (isPlus) {
+  var curLevel = this.zoom;
+  var pos = this.zoomLevels.indexOf(curLevel + "");
 
-GanttMaster.prototype.init = function (workSpace) {
-  var place=$("<div>").prop("id","TWGanttArea").css( {padding:0, "overflow-y":"auto", "overflow-x":"hidden","border":"1px solid #e5e5e5",position:"relative"});
-  workSpace.append(place).addClass("TWGanttWorkSpace");
+  var centerMillis=this.getCenterMillis();
+  var newPos = pos;
+  if (isPlus) {
+    newPos = pos <= 0 ? 0 : pos - 1;
+  } else {
+    newPos = pos >= this.zoomLevels.length - 1 ? this.zoomLevels.length - 1 : pos + 1;
+  }
+  if (newPos != pos) {
+    curLevel = this.zoomLevels[newPos];
+    this.zoom = curLevel;
+    this.refreshGantt();
+    this.goToMillis(centerMillis);
+  }
+};
 
-  this.workSpace=workSpace;
-  this.element = place;
 
-  //by default task are coloured by status
-  this.element.addClass('colorByStatus' )
-
+Ganttalendar.prototype.create = function (zoom, originalStartmillis, originalEndMillis) {
+  //console.debug("Gantt.create " + new Date(originalStartmillis) + " - " + new Date(originalEndMillis));
+  //var prof = new Profiler("ganttDrawer.create");
   var self = this;
-  //load templates
-  $("#gantEditorTemplates").loadTemplates().remove();
 
-  //create editor
-  this.editor = new GridEditor(this);
-  place.append(this.editor.gridified);
+  function getPeriod(zoomLevel, stMil, endMillis) {
+    var start = new Date(stMil);
+    var end = new Date(endMillis);
 
-  //create gantt
-  this.gantt = new Ganttalendar("m", new Date().getTime() - 3600000 * 24 * 2, new Date().getTime() + 3600000 * 24 * 15, this, place.width() * .6);
+    start.setHours(0, 0, 0, 0);
+    end.setHours(23, 59, 59, 999);
 
-  //setup splitter
-  self.splitter = $.splittify.init(place, this.editor.gridified, this.gantt.element, 60);
-  self.splitter.firstBoxMinWidth = 5;
-  self.splitter.secondBoxMinWidth = 20;
+    //reset hours
+    if (zoomLevel == "d") {
+      start.setFirstDayOfThisWeek();
+      end.setFirstDayOfThisWeek();
+      end.setDate(end.getDate() + 6);
 
-  //prepend buttons
-  var ganttButtons = $.JST.createFromTemplate({}, "GANTBUTTONS");
-  place.before(ganttButtons);
-  this.checkButtonPermissions();
+      //reset day of week
+    } else if (zoomLevel == "w" ) {
+      start.setFirstDayOfThisWeek();
+      start.setDate(start.getDate()-7);
+      end.setFirstDayOfThisWeek();
+      end.setDate(end.getDate() + 13);
 
+    } else if (zoomLevel == "w2" ) {
+      start.setFirstDayOfThisWeek();
+      start.setDate(start.getDate()-7);
+      end.setFirstDayOfThisWeek();
+      end.setDate(end.getDate() + 20);
 
-  //bindings
-  workSpace.bind("refreshTasks.gantt", function () {
-    self.redrawTasks();
-  }).bind("refreshTask.gantt", function (e, task) {
-    self.drawTask(task);
+    } else if (zoomLevel == "w3" ) {
+      start.setFirstDayOfThisWeek();
+      start.setDate(start.getDate()-7);
+      end.setFirstDayOfThisWeek();
+      end.setDate(end.getDate() + 27);
 
-  }).bind("deleteFocused.gantt", function (e) {
-    //delete task or link?
-    var focusedSVGElement=self.gantt.element.find(".focused.focused.linkGroup");
-    if (focusedSVGElement.size()>0)
-      self.removeLink(focusedSVGElement.data("from"), focusedSVGElement.data("to"));
-    else
-    self.deleteCurrentTask();
-  }).bind("addAboveCurrentTask.gantt", function () {
-    self.addAboveCurrentTask();
-  }).bind("addBelowCurrentTask.gantt", function () {
-    self.addBelowCurrentTask();
-  }).bind("indentCurrentTask.gantt", function () {
-    self.indentCurrentTask();
-  }).bind("outdentCurrentTask.gantt", function () {
-    self.outdentCurrentTask();
-  }).bind("moveUpCurrentTask.gantt", function () {
-    self.moveUpCurrentTask();
-  }).bind("moveDownCurrentTask.gantt", function () {
-    self.moveDownCurrentTask();
-  }).bind("collapseAll.gantt", function () {
-    self.collapseAll();
-  }).bind("expandAll.gantt", function () {
-    self.expandAll();
-  }).bind("fullScreen.gantt", function () {
-    self.fullScreen();
+      //reset day of month
+    } else if (zoomLevel == "m") {
+      start.setDate(1);
+      start.setMonth(start.getMonth()-1);
+      end.setDate(1);
+      end.setMonth(end.getMonth() + 2);
+      end.setDate(end.getDate() - 1);
 
+    } else if (zoomLevel == "m2") {
+      start.setDate(1);
+      start.setMonth(start.getMonth()-1);
+      end.setDate(1);
+      end.setMonth(end.getMonth() + 3);
+      end.setDate(end.getDate() - 1);
 
-  }).bind("zoomPlus.gantt", function () {
-    self.gantt.zoomGantt(true);
-  }).bind("zoomMinus.gantt", function () {
-    self.gantt.zoomGantt(false);
+      //reset to day of week
+    } else if (zoomLevel == "q") {
+      start.setDate(start.getDate()-start.getDay()+1); //ISO 8601 counts week of year starting on Moday
+      start.setDate(start.getDate()-7);
+      end.setFirstDayOfThisWeek();
+      end.setDate(end.getDate() + 13);
 
-  }).bind("openFullEditor.gantt", function () {
-    self.editor.openFullEditor(self.currentTask,false);
-  }).bind("openAssignmentEditor.gantt", function () {
-    self.editor.openFullEditor(self.currentTask,true);
-  }).bind("addIssue.gantt", function () {
-    self.addIssue();
-  }).bind("openExternalEditor.gantt", function () {
-    self.openExternalEditor();
+      //reset to quarter
+    } else if (zoomLevel == "q2") {
+      start.setDate(1);
+      start.setMonth(Math.floor(start.getMonth() / 3) * 3);
+      start.setMonth(start.getMonth()-3);
+      end.setDate(1);
+      end.setMonth(Math.floor(end.getMonth() / 3) * 3 + 6);
+      end.setDate(end.getDate() - 1);
 
-  }).bind("undo.gantt", function () {
-    if (!self.permissions.canWrite)
-      return;
-    self.undo();
-  }).bind("redo.gantt", function () {
-    if (!self.permissions.canWrite)
-      return;
-    self.redo();
-  }).bind("resize.gantt", function () {
-    self.resize();
-  });
+      //reset to semester
+    } else if (zoomLevel == "s") {
+      start.setDate(1);
+      start.setMonth(Math.floor(start.getMonth() / 6) * 6);
+      start.setMonth(start.getMonth()-6);
+      end.setDate(1);
+      end.setMonth(Math.floor(end.getMonth() / 6) * 6 + 12);
+      end.setDate(end.getDate() - 1);
 
+      //reset to year - > gen
+    } else if (zoomLevel == "y") {
+      start.setDate(1);
+      start.setMonth(0);
+      start.setFullYear(start.getFullYear()-1);
+      end.setDate(1);
+      end.setMonth(24);
+      end.setDate(end.getDate() - 1);
+    }
+    return {start:start.getTime(), end:end.getTime()};
+  }
 
-  //keyboard management bindings
-  $("body").bind("keydown.body", function (e) {
-    //console.debug(e.keyCode+ " "+e.target.nodeName, e.ctrlKey)
+  function createHeadCell(lbl, span, additionalClass, width) {
+    var th = $("<th>").html(lbl).attr("colSpan", span);
+    if (width)
+      th.width(width);
+    if (additionalClass)
+      th.addClass(additionalClass);
+    return th;
+  }
 
-    var eventManaged = true;
-    var isCtrl = e.ctrlKey || e.metaKey;
-    var bodyOrSVG = e.target.nodeName.toLowerCase() == "body" || e.target.nodeName.toLowerCase() == "svg";
-    var inWorkSpace=$(e.target).closest("#TWGanttArea").length>0;
+  function createBodyCell(span, isEnd, additionalClass) {
+    var ret = $("<td>").html("").attr("colSpan", span).addClass("ganttBodyCell");
+    if (isEnd)
+      ret.addClass("end");
+    if (additionalClass)
+      ret.addClass(additionalClass);
+    return ret;
+  }
 
-    //store focused field
-    var focusedField=$(":focus");
-    var focusedSVGElement = self.gantt.element.find(".focused.focused");// orrible hack for chrome that seems to keep in memory a cached object
+  function createGantt(zoom, startPeriod, endPeriod) {
+    var tr1 = $("<tr>").addClass("ganttHead1");
+    var tr2 = $("<tr>").addClass("ganttHead2");
+    var trBody = $("<tr>").addClass("ganttBody");
 
-    var isFocusedSVGElement=focusedSVGElement.length >0;
+    function iterate(renderFunction1, renderFunction2) {
+      var start = new Date(startPeriod);
+      //loop for header1
+      while (start.getTime() <= endPeriod) {
+        renderFunction1(start);
+      }
 
-    if ((inWorkSpace ||isFocusedSVGElement) && isCtrl && e.keyCode == 37) { // CTRL+LEFT on the grid
-      self.outdentCurrentTask();
-      focusedField.focus();
-
-    } else if (inWorkSpace && isCtrl && e.keyCode == 38) { // CTRL+UP   on the grid
-      self.moveUpCurrentTask();
-      focusedField.focus();
-
-    } else if (inWorkSpace && isCtrl && e.keyCode == 39) { //CTRL+RIGHT  on the grid
-      self.indentCurrentTask();
-      focusedField.focus();
-
-    } else if (inWorkSpace && isCtrl && e.keyCode == 40) { //CTRL+DOWN   on the grid
-      self.moveDownCurrentTask();
-      focusedField.focus();
-
-    } else if (isCtrl && e.keyCode == 89) { //CTRL+Y
-      self.redo();
-
-    } else if (isCtrl && e.keyCode == 90) { //CTRL+Y
-      self.undo();
-
-
-    } else if ( (isCtrl && inWorkSpace) &&   (e.keyCode == 8 || e.keyCode == 46)  ) { //CTRL+DEL CTRL+BACKSPACE  on grid
-      self.deleteCurrentTask();
-
-    } else if ( focusedSVGElement.is(".taskBox") &&   (e.keyCode == 8 || e.keyCode == 46)  ) { //DEL BACKSPACE  svg task
-        self.deleteCurrentTask();
-
-    } else if ( focusedSVGElement.is(".linkGroup") &&   (e.keyCode == 8 || e.keyCode == 46)  ) { //DEL BACKSPACE  svg link
-        self.removeLink(focusedSVGElement.data("from"), focusedSVGElement.data("to"));
-
-    } else {
-      eventManaged=false;
+      //loop for header2
+      start = new Date(startPeriod);
+      while (start.getTime() <= endPeriod) {
+        renderFunction2(start);
+      }
     }
 
+    //this is computed by hand in order to optimize cell size
+    var computedTableWidth;
+    var computedScaleX;
+    // year
+    if (zoom == "y") {
+      computedScaleX=100/(3600000 * 24*180); //1 sem= 100px
+      iterate(function (date) {
+        tr1.append(createHeadCell(date.format("yyyy"), 2));
+        date.setFullYear(date.getFullYear() + 1);
+      }, function (date) {
+        var end = new Date(date.getTime());
+        end.setMonth(end.getMonth() + 6);
+        var periodWidth=(end.getTime()-date.getTime())*computedScaleX;
+        var sem = (Math.floor(date.getMonth() / 6) + 1);
+        tr2.append(createHeadCell(GanttMaster.messages["GANTT_SEMESTER_SHORT"] + sem, 1, null, periodWidth));
+        trBody.append(createBodyCell(1, sem == 2));
+        date.setMonth(date.getMonth() + 6);
+      });
 
-    if (eventManaged) {
+      //semester
+    } else if (zoom == "s") {
+      computedScaleX=200/(3600000 * 24*90); //1 quarter= 200px
+      iterate(function (date) {
+        var end = new Date(date.getTime());
+        end.setMonth(end.getMonth() + 6);
+        end.setDate(end.getDate() - 1);
+        tr1.append(createHeadCell(date.format("MMMM") + " - " + end.format("MMMM yyyy"), 6));
+        date.setMonth(date.getMonth() + 6);
+      }, function (date) {
+        var end = new Date(date.getTime());
+        end.setMonth(end.getMonth() + 1);
+        var periodWidth=(end.getTime()-date.getTime())*computedScaleX;
+        tr2.append(createHeadCell(date.format("MMM"), 1, null, periodWidth));
+        trBody.append(createBodyCell(1, (date.getMonth()+1) % 6 == 0));
+        date.setMonth(date.getMonth() + 1);
+      });
+
+
+      //quarter
+     } else if (zoom == "q2") {
+      computedScaleX=150/(3600000 * 24*30); //1 month= 150px
+      iterate(function (date) {
+        var end = new Date(date.getTime());
+        end.setMonth(end.getMonth() + 3);
+        end.setDate(end.getDate() - 1);
+        tr1.append(createHeadCell(date.format("MMMM") + " - " + end.format("MMMM yyyy"), 3));
+        date.setMonth(date.getMonth() + 3);
+      }, function (date) {
+        var end = new Date(date.getTime());
+        end.setMonth(end.getMonth() + 1);
+        var periodWidth=(end.getTime()-date.getTime())*computedScaleX;
+
+        var lbl = date.format("MMMM");
+        tr2.append(createHeadCell(lbl, 1, null, periodWidth));
+        trBody.append(createBodyCell(1, date.getMonth() % 3 == 2));
+        date.setMonth(date.getMonth() + 1);
+      });
+
+      // quarter / week of year
+    } else if (zoom == "q") {
+      computedScaleX=300/(3600000 * 24*30); //1 month= 300px
+      iterate(function (date) {
+        var end = new Date(date.getTime());
+        end.setMonth(end.getMonth() + 3);
+        end.setDate(end.getDate() - 1);
+        tr1.append(createHeadCell(date.format("MMMM") + " - " + end.format("MMMM yyyy"), Math.round((end.getTime()-date.getTime())/(3600000*24))));
+        date.setMonth(date.getMonth() + 3);
+      }, function (date) {
+        var end = new Date(date.getTime());
+        end.setDate(end.getDate() + 7);
+        var periodWidth=(end.getTime()-date.getTime())*computedScaleX;
+        var lbl ="<small>"+i18n["WEEK_SHORT"].toLowerCase()+"</small> "+ date.format("w");
+        tr2.append(createHeadCell(lbl, 7, null, periodWidth));
+        trBody.append(createBodyCell(7,false));
+        date.setDate(date.getDate() + 7);
+      });
+
+      //month
+    } else if (zoom == "m2") {
+      computedScaleX=15/(3600000 * 24); //1 day= 15px
+      iterate(function (date) {
+        var sm = date.getTime();
+        date.setMonth(date.getMonth() + 1);
+        var daysInMonth = Math.round((date.getTime() - sm) / (3600000 * 24));
+        tr1.append(createHeadCell(new Date(sm).format("MMMM yyyy"), daysInMonth)); //spans mumber of dayn in the month
+      }, function (date) {
+        var end = new Date(date.getTime());
+        end.setDate(end.getDate() + 1);
+        var periodWidth=(end.getTime()-date.getTime())*computedScaleX;
+        tr2.append(createHeadCell(date.format("d"), 1, isHoliday(date) ? "holyH headSmall" : "headSmall", periodWidth));
+        var nd = new Date(date.getTime());
+        nd.setDate(date.getDate() + 1);
+        trBody.append(createBodyCell(1, nd.getDate() == 1, isHoliday(date) ? "holy" : null));
+        date.setDate(date.getDate() + 1);
+      });
+
+    } else if (zoom == "m") {
+      computedScaleX=25/(3600000 * 24); //1 day= 25px
+
+      iterate(function (date) {
+        var sm = date.getTime();
+        date.setMonth(date.getMonth() + 1);
+        var daysInMonth = Math.round((date.getTime() - sm) / (3600000 * 24));
+        tr1.append(createHeadCell(new Date(sm).format("MMMM yyyy"), daysInMonth)); //spans mumber of dayn in the month
+      }, function (date) {
+        var end = new Date(date.getTime());
+        end.setDate(end.getDate() + 1);
+        var periodWidth=(end.getTime()-date.getTime())*computedScaleX;
+        tr2.append(createHeadCell(date.format("d"), 1, isHoliday(date) ? "holyH" : null, periodWidth));
+        var nd = new Date(date.getTime());
+        nd.setDate(date.getDate() + 1);
+        trBody.append(createBodyCell(1, nd.getDate() == 1, isHoliday(date) ? "holy" : null));
+        date.setDate(date.getDate() + 1);
+      });
+
+      //week
+    } else if (zoom == "w3") {
+      computedScaleX=30/(3600000 * 24); //1 day= 30px
+
+      iterate(function (date) {
+        var end = new Date(date.getTime());
+        end.setDate(end.getDate() + 6);
+        tr1.append(createHeadCell(date.format("MMM d") + " - " + end.format("MMM d 'yy"), 7));
+        date.setDate(date.getDate() + 7);
+      }, function (date) {
+        var end = new Date(date.getTime());
+        end.setDate(end.getDate() + 1);
+        var periodWidth=(end.getTime()-date.getTime())*computedScaleX;
+
+        tr2.append(createHeadCell(date.format("EEEE").substr(0, 1), 1, isHoliday(date) ? "holyH" : null, periodWidth));
+        trBody.append(createBodyCell(1, date.getDay() % 7 == (self.master.firstDayOfWeek + 6) % 7, isHoliday(date) ? "holy" : null));
+        date.setDate(date.getDate() + 1);
+      });
+
+    } else if (zoom == "w2") {
+      computedScaleX=40/(3600000 * 24); //1 day= 40px
+      iterate(function (date) {
+        var end = new Date(date.getTime());
+        end.setDate(end.getDate() + 6);
+        tr1.append(createHeadCell(date.format("MMM d") + " - " + end.format("MMM d 'yy"), 7));
+        date.setDate(date.getDate() + 7);
+      }, function (date) {
+        var end = new Date(date.getTime());
+        end.setDate(end.getDate() + 1);
+        var periodWidth=(end.getTime()-date.getTime())*computedScaleX;
+
+        tr2.append(createHeadCell(date.format("EEEE").substr(0, 1), 1, isHoliday(date) ? "holyH" : null, periodWidth));
+        trBody.append(createBodyCell(1, date.getDay() % 7 == (self.master.firstDayOfWeek + 6) % 7, isHoliday(date) ? "holy" : null));
+        date.setDate(date.getDate() + 1);
+      });
+
+    } else if (zoom == "w") {
+      computedScaleX=50/(3600000 * 24);//1 day= 50px
+      iterate(function (date) {
+        var end = new Date(date.getTime());
+        end.setDate(end.getDate() + 6);
+        tr1.append(createHeadCell(date.format("MMM d") + " - " + end.format("MMM d 'yy"), 7));
+        date.setDate(date.getDate() + 7);
+      }, function (date) {
+        var end = new Date(date.getTime());
+        end.setDate(end.getDate() + 1);
+        var periodWidth=(end.getTime()-date.getTime())*computedScaleX;
+        tr2.append(createHeadCell(date.format("EEEE").substr(0, 1), 1, isHoliday(date) ? "holyH" : null, periodWidth));
+        trBody.append(createBodyCell(1, date.getDay() % 7 == (self.master.firstDayOfWeek + 6) % 7, isHoliday(date) ? "holy" : null));
+        date.setDate(date.getDate() + 1);
+      });
+
+      //days
+    } else if (zoom == "d") {
+      computedScaleX=100/(3600000 * 24);//1 day= 100px
+      iterate(function (date) {
+        var end = new Date(date.getTime());
+        end.setDate(end.getDate() + 6);
+        tr1.append(createHeadCell(date.format("MMMM d") + " - " + end.format("MMMM d yyyy"), 7));
+        date.setDate(date.getDate() + 7);
+      }, function (date) {
+        var end = new Date(date.getTime());
+        end.setDate(end.getDate() + 1);
+        var periodWidth=(end.getTime()-date.getTime())*computedScaleX;
+
+        tr2.append(createHeadCell(date.format("EEE d"), 1, isHoliday(date) ? "holyH" : null, periodWidth));
+        trBody.append(createBodyCell(1, date.getDay() % 7 == (self.master.firstDayOfWeek + 6) % 7, isHoliday(date) ? "holy" : null));
+        date.setDate(date.getDate() + 1);
+      });
+
+    } else {
+      console.error("Wrong level " + zoom);
+    }
+
+    computedTableWidth = (endPeriod - startPeriod)*computedScaleX;
+
+
+    //set a minimal width
+    computedTableWidth = Math.max(computedTableWidth, self.minGanttSize);
+
+    var table = $("<table cellspacing=0 cellpadding=0>");
+    table.append(tr1).append(tr2);   // removed as on FF there are rounging issues  //.css({width:computedTableWidth});
+
+    var head = table.clone().addClass("ganttFixHead");
+
+    table.append(trBody).addClass("ganttTable");
+
+
+    var height = self.master.editor.element.height();
+    table.height(height);
+
+    var box = $("<div>");
+    box.addClass("gantt unselectable").attr("unselectable", "true").css({position:"relative", width:computedTableWidth});
+    box.append(table);
+    box.append(head);
+
+    //create the svg
+    box.svg({settings:{class:"ganttSVGBox"},
+      onLoad:         function (svg) {
+        //console.debug("svg loaded", svg);
+
+        //creates gradient and definitions
+        var defs = svg.defs('myDefs');
+
+
+        //create backgound
+        var extDep = svg.pattern(defs, "extDep", 0, 0, 10, 10, 0, 0, 10, 10, {patternUnits:'userSpaceOnUse'});
+        var img=svg.image(extDep, 0, 0, 10, 10, self.master.resourceUrl +"hasExternalDeps.png",{opacity:.3});
+
+        self.svg = svg;
+        $(svg).addClass("ganttSVGBox");
+
+        //creates grid group
+        var gridGroup = svg.group("gridGroup");
+
+        //creates rows grid
+        for (var i = 40; i <= height; i += self.rowHeight)
+          //svg.line(gridGroup, 0, i, "100%", i, {class:"ganttLinesSVG"});
+          svg.rect(gridGroup, 0, i, "100%",self.rowHeight, {class:"ganttLinesSVG"});
+
+        //creates links group
+        self.linksGroup = svg.group("linksGroup");
+
+        //creates tasks group
+        self.tasksGroup = svg.group("tasksGroup");
+
+        //compute scalefactor fx
+        //self.fx = computedTableWidth / (endPeriod - startPeriod);
+        self.fx = computedScaleX;
+
+        // drawTodayLine
+        if (new Date().getTime() > self.startMillis && new Date().getTime() < self.endMillis) {
+          var x = Math.round(((new Date().getTime()) - self.startMillis) * self.fx);
+          svg.line(gridGroup, x, 0, x, "100%", {class:"ganttTodaySVG"});
+        }
+
+      }
+    });
+
+    return box;
+  }
+
+  //if include today synch extremes
+  if (this.includeToday) {
+    var today = new Date().getTime();
+    originalStartmillis = originalStartmillis > today ? today : originalStartmillis;
+    originalEndMillis = originalEndMillis < today ? today : originalEndMillis;
+  }
+
+  //get best dimension fo gantt
+  var period = getPeriod(zoom, originalStartmillis, originalEndMillis); //this is enlarged to match complete periods basing on zoom level
+
+  //console.debug(new Date(period.start) + "   " + new Date(period.end));
+  self.startMillis = period.start; //real dimension of gantt
+  self.endMillis = period.end;
+  self.originalStartMillis = originalStartmillis; //minimal dimension required by user or by task duration
+  self.originalEndMillis = originalEndMillis;
+
+  var table = createGantt(zoom, period.start, period.end);
+
+
+  //prof.stop();
+  return table;
+};
+
+
+//<%-------------------------------------- GANT TASK GRAPHIC ELEMENT --------------------------------------%>
+Ganttalendar.prototype.drawTask = function (task) {
+  //console.debug("drawTask", task.name,new Date(task.start));
+  var self = this;
+  //var prof = new Profiler("ganttDrawTask");
+  editorRow = task.rowElement;
+  var top = editorRow.position().top + editorRow.offsetParent().scrollTop();
+
+  //var normStart=Math.round(task.start/(3600000*24))*(3600000*24)
+  //var normX = Math.round((normStart - self.startMillis) * self.fx);
+
+  var x = Math.round((task.start - self.startMillis) * self.fx);
+
+  //console.debug(x,normX)
+
+
+  task.hasChild = task.isParent();
+
+  var taskBox = $(_createTaskSVG(task, {x:x, y:top+self.taskVertOffset, width:Math.round((task.end - task.start) * self.fx),height:self.taskHeight}));
+  task.ganttElement = taskBox;
+  if (self.showCriticalPath && task.isCritical)
+    taskBox.addClass("critical");
+
+  if (this.master.permissions.canWrite && task.canWrite) {
+
+    //bind all events on taskBox
+    taskBox
+      .click(function (e) { // manages selection
+        e.stopPropagation();// to avoid body remove focused
+        self.element.find("[class*=focused]").removeClass("focused");
+        $(".ganttSVGBox .focused").removeClass("focused");
+        var el = $(this);
+        if (!self.resDrop)
+          el.addClass("focused");
+        self.resDrop = false; //hack to avoid select
+
+        $("body").off("click.focused").one("click.focused", function () {
+          $(".ganttSVGBox .focused").removeClass("focused");
+        })
+
+      }).dblclick(function () {
+        self.master.showTaskEditor($(this).attr("taskid"));
+      }).mouseenter(function () {
+        //bring to top
+        var el = $(this);
+        if (!self.linkOnProgress) {
+          el.find("[class*=linkHandleSVG]").show();
+        } else {
+          el.addClass("linkOver");
+        }
+      }).mouseleave(function () {
+        var el = $(this);
+        el.removeClass("linkOver").find("[class*=linkHandleSVG]").hide();
+
+      }).mouseup(function (e) {
+        $(":focus").blur(); // in order to save grid field when moving task
+      }).mousedown(function () {
+        var task = self.master.getTask($(this).attr("taskid"));
+        task.rowElement.click();
+      }).dragExtedSVG($(self.svg.root()), {
+        canResize:  this.master.permissions.canWrite && task.canWrite,
+        canDrag:    !task.depends && this.master.permissions.canWrite && task.canWrite,
+        startDrag:  function (e) {
+          $(".ganttSVGBox .focused").removeClass("focused");
+        },
+        drag:       function (e) {
+          $("[from=" + task.id + "],[to=" + task.id + "]").trigger("update");
+        },
+        drop:       function (e) {
+          self.resDrop = true; //hack to avoid select
+          var taskbox = $(this);
+          var task = self.master.getTask(taskbox.attr("taskid"));
+          var s = Math.round((parseFloat(taskbox.attr("x")) / self.fx) + self.startMillis);
+          self.master.beginTransaction();
+          self.master.moveTask(task, new Date(s));
+          self.master.endTransaction();
+        },
+        startResize:function (e) {
+          //console.debug("startResize");
+          $(".ganttSVGBox .focused").removeClass("focused");
+          var taskbox = $(this);
+          var text = $(self.svg.text(parseInt(taskbox.attr("x")) + parseInt(taskbox.attr("width") + 8), parseInt(taskbox.attr("y")), "", {"font-size":"10px", "fill":"red"}));
+          taskBox.data("textDur", text);
+        },
+        resize:     function (e) {
+          //find and update links from, to
+          var taskbox = $(this);
+          var st = Math.round((parseFloat(taskbox.attr("x")) / self.fx) + self.startMillis);
+          var en = Math.round(((parseFloat(taskbox.attr("x")) + parseFloat(taskbox.attr("width"))) / self.fx) + self.startMillis);
+          var d = computeStartDate(st).distanceInWorkingDays(computeEndDate(en))+1;
+          var text = taskBox.data("textDur");
+          text.attr("x", parseInt(taskbox.attr("x")) + parseInt(taskbox.attr("width")) + 8).html(d);
+
+          $("[from=" + task.id + "],[to=" + task.id + "]").trigger("update");
+        },
+        stopResize: function (e) {
+          self.resDrop = true; //hack to avoid select
+          //console.debug(ui)
+          var textBox = taskBox.data("textDur");
+          if (textBox)
+            textBox.remove();
+          var taskbox = $(this);
+          var task = self.master.getTask(taskbox.attr("taskid"));
+          var st = Math.round((parseFloat(taskbox.attr("x")) / self.fx) + self.startMillis);
+          var en = Math.round(((parseFloat(taskbox.attr("x")) + parseFloat(taskbox.attr("width"))) / self.fx) + self.startMillis);
+          self.master.beginTransaction();
+          self.master.changeTaskDates(task, new Date(st), new Date(en));
+          self.master.endTransaction();
+        }
+      });
+
+    //binding for creating link
+    taskBox.find("[class*=linkHandleSVG]").mousedown(function (e) {
       e.preventDefault();
       e.stopPropagation();
-    }
-
-  });
-
-  //ask for comment input
-  $("#saveGanttButton").after($('#LOG_CHANGES_CONTAINER'));
-
-  //ask for comment management
-  this.element.on("saveRequired.gantt",this.manageSaveRequired);
-
-
-  //resize
-  $(window).resize(function () {
-    place.css({width: "100%", height: $(window).height() - place.position().top});
-    place.trigger("resize.gantt");
-  }).oneTime(2, "resize", function () {$(this).trigger("resize")});
-
-
-};
-
-GanttMaster.messages = {
-  "CANNOT_WRITE":                          "CANNOT_WRITE",
-  "CHANGE_OUT_OF_SCOPE":                   "NO_RIGHTS_FOR_UPDATE_PARENTS_OUT_OF_EDITOR_SCOPE",
-  "START_IS_MILESTONE":                    "START_IS_MILESTONE",
-  "END_IS_MILESTONE":                      "END_IS_MILESTONE",
-  "TASK_HAS_CONSTRAINTS":                  "TASK_HAS_CONSTRAINTS",
-  "GANTT_ERROR_DEPENDS_ON_OPEN_TASK":      "GANTT_ERROR_DEPENDS_ON_OPEN_TASK",
-  "GANTT_ERROR_DESCENDANT_OF_CLOSED_TASK": "GANTT_ERROR_DESCENDANT_OF_CLOSED_TASK",
-  "TASK_HAS_EXTERNAL_DEPS":                "TASK_HAS_EXTERNAL_DEPS",
-  "GANTT_ERROR_LOADING_DATA_TASK_REMOVED": "GANTT_ERROR_LOADING_DATA_TASK_REMOVED",
-  "CIRCULAR_REFERENCE":                    "CIRCULAR_REFERENCE",
-  "CANNOT_MOVE_TASK":                      "CANNOT_MOVE_TASK",
-  "CANNOT_DEPENDS_ON_ANCESTORS":           "CANNOT_DEPENDS_ON_ANCESTORS",
-  "CANNOT_DEPENDS_ON_DESCENDANTS":         "CANNOT_DEPENDS_ON_DESCENDANTS",
-  "INVALID_DATE_FORMAT":                   "INVALID_DATE_FORMAT",
-  "GANTT_QUARTER_SHORT":                   "GANTT_QUARTER_SHORT",
-  "GANTT_SEMESTER_SHORT":                  "GANTT_SEMESTER_SHORT",
-  "CANNOT_CLOSE_TASK_IF_OPEN_ISSUE":       "CANNOT_CLOSE_TASK_IF_OPEN_ISSUE",
-  "PLEASE_SAVE_PROJECT":                   "PLEASE_SAVE_PROJECT"
-};
-
-
-GanttMaster.prototype.createTask = function (id, name, code, level, start, duration) {
-  var factory = new TaskFactory();
-  return factory.build(id, name, code, level, start, duration);
-};
-
-
-GanttMaster.prototype.getOrCreateResource = function (id, name) {
-  var res= this.getResource(id);
-  if (!res && id && name) {
-    res = this.createResource(id, name);
-  }
-  return res
-};
-
-GanttMaster.prototype.createResource = function (id, name) {
-  var res = new Resource(id, name);
-  this.resources.push(res);
-  return res;
-};
-
-
-//update depends strings
-GanttMaster.prototype.updateDependsStrings = function () {
-  //remove all deps
-  for (var i = 0; i < this.tasks.length; i++) {
-    this.tasks[i].depends = "";
-  }
-
-  for (var i = 0; i < this.links.length; i++) {
-    var link = this.links[i];
-    var dep = link.to.depends;
-    link.to.depends = link.to.depends + (link.to.depends == "" ? "" : ",") + (link.from.getRow() + 1) + (link.lag ? ":" + link.lag : "");
-  }
-
-};
-
-GanttMaster.prototype.removeLink = function (fromTask, toTask) {
-  //console.debug("removeLink");
-  if (!this.permissions.canWrite || (!fromTask.canWrite && !toTask.canWrite))
-    return;
-
-  this.beginTransaction();
-  var found = false;
-  for (var i = 0; i < this.links.length; i++) {
-    if (this.links[i].from == fromTask && this.links[i].to == toTask) {
-      this.links.splice(i, 1);
-      found = true;
-      break;
-    }
-  }
-
-  if (found) {
-    this.updateDependsStrings();
-    if (this.updateLinks(toTask))
-      this.changeTaskDates(toTask, toTask.start, toTask.end); // fake change to force date recomputation from dependencies
-  }
-  this.endTransaction();
-};
-
-GanttMaster.prototype.removeAllLinks = function (task, openTrans) {
-  //console.debug("removeLink");
-  if (!this.permissions.canWrite || (!task.canWrite && !task.canWrite))
-    return;
-
-  if (openTrans)
-    this.beginTransaction();
-  var found = false;
-  for (var i = 0; i < this.links.length; i++) {
-    if (this.links[i].from == task || this.links[i].to == task) {
-      this.links.splice(i, 1);
-      found = true;
-    }
-  }
-
-  if (found) {
-    this.updateDependsStrings();
-  }
-  if (openTrans)
-    this.endTransaction();
-};
-
-//------------------------------------  ADD TASK --------------------------------------------
-GanttMaster.prototype.addTask = function (task, row) {
-  //console.debug("master.addTask",task,row,this);
-  if (!this.permissions.canWrite || !this.permissions.canAdd )
-    return;
-
-  task.master = this; // in order to access controller from task
-
-  //replace if already exists
-  var pos = -1;
-  for (var i = 0; i < this.tasks.length; i++) {
-    if (task.id == this.tasks[i].id) {
-      pos = i;
-      break;
-    }
-  }
-
-  if (pos >= 0) {
-    this.tasks.splice(pos, 1);
-    row = parseInt(pos);
-  }
-
-  //add task in collection
-  if (typeof(row) != "number") {
-    this.tasks.push(task);
-  } else {
-    this.tasks.splice(row, 0, task);
-
-    //recompute depends string
-    this.updateDependsStrings();
-  }
-
-  //add Link collection in memory
-  var linkLoops = !this.updateLinks(task);
-
-  //set the status according to parent
-  if (task.getParent())
-    task.status = task.getParent().status;
-  else
-    task.status = "STATUS_ACTIVE";
-
-  var ret = task;
-  if (linkLoops || !task.setPeriod(task.start, task.end)) {
-    //remove task from in-memory collection
-    //console.debug("removing task from memory",task);
-    this.tasks.splice(task.getRow(), 1);
-    ret = undefined;
-  } else {
-    //append task to editor
-    this.editor.addTask(task, row);
-    //append task to gantt
-    this.gantt.addTask(task);
-  }
-
-//trigger addedTask event 
-  $(this.element).trigger("addedTask.gantt", task);
-  return ret;
-};
-
-
-/**
- * a project contais tasks, resources, roles, and info about permisions
- * @param project
- */
-GanttMaster.prototype.loadProject = function (project) {
-  //console.debug("loadProject", project)
-  this.beginTransaction();
-  this.serverClientTimeOffset = typeof project.serverTimeOffset !="undefined"? (parseInt(project.serverTimeOffset) + new Date().getTimezoneOffset() * 60000) : 0;
-  this.resources = project.resources;
-  this.roles = project.roles;
-
-  //permissions from loaded project
-  this.permissions.canWrite = project.canWrite;
-  this.permissions.canWriteOnParent = project.canWriteOnParent;
-  this.permissions.cannotCloseTaskIfIssueOpen = project.cannotCloseTaskIfIssueOpen;
-  this.permissions.canAddIssue = project.canAddIssue;
-  this.permissions.canDelete = project.canDelete;
-  //repaint button bar basing on permissions
-  this.checkButtonPermissions();
-
-
-
-  if (project.minEditableDate)
-    this.minEditableDate = computeStart(project.minEditableDate);
-  else
-    this.minEditableDate = -Infinity;
-
-  if (project.maxEditableDate)
-    this.maxEditableDate = computeEnd(project.maxEditableDate);
-  else
-    this.maxEditableDate = Infinity;
-
-
-  //recover stored ccollapsed statuas
-  var collTasks=this.loadCollapsedTasks();
-
-  //shift dates in order to have client side the same hour (e.g.: 23:59) of the server side
-  for (var i = 0; i < project.tasks.length; i++) {
-    var task = project.tasks[i];
-    task.start += this.serverClientTimeOffset;
-    task.end += this.serverClientTimeOffset;
-
-    //set initial collapsed status
-    task.collapsed=collTasks.indexOf(task.id)>=0;
-  }
-
-
-  this.loadTasks(project.tasks, project.selectedRow);
-  this.deletedTaskIds = [];
-
-  //recover saved zoom level
-  if (project.zoom){
-    this.gantt.zoom = project.zoom;
-  }
-
-
-  this.endTransaction();
-  var self = this;
-  this.gantt.element.oneTime(200, function () {self.gantt.centerOnToday()});
-};
-
-
-GanttMaster.prototype.loadTasks = function (tasks, selectedRow) {
-  //console.debug("GanttMaster.prototype.loadTasks")
-  var factory = new TaskFactory();
-  //reset
-  this.reset();
-
-  for (var i = 0; i < tasks.length; i++) {
-    var task = tasks[i];
-    if (!(task instanceof Task)) {
-      var t = factory.build(task.id, task.name, task.code, task.level, task.start, task.duration, task.collapsed);
-      for (var key in task) {
-        if (key != "end" && key != "start")
-          t[key] = task[key]; //copy all properties
-      }
-      task = t;
-    }
-    task.master = this; // in order to access controller from task
-    this.tasks.push(task);  //append task at the end
-  }
-
-  //var prof=new Profiler("gm_loadTasks_addTaskLoop");
-  for (var i = 0; i < this.tasks.length; i++) {
-    var task = this.tasks[i];
-
-
-    var numOfError = this.__currentTransaction && this.__currentTransaction.errors ? this.__currentTransaction.errors.length : 0;
-    //add Link collection in memory
-    while (!this.updateLinks(task)) {  // error on update links while loading can be considered as "warning". Can be displayed and removed in order to let transaction commits.
-      if (this.__currentTransaction && numOfError != this.__currentTransaction.errors.length) {
-        var msg = "ERROR:\n";
-        while (numOfError < this.__currentTransaction.errors.length) {
-          var err = this.__currentTransaction.errors.pop();
-          msg = msg + err.msg + "\n\n";
-        }
-        alert(msg);
-      }
-      this.removeAllLinks(task, false);
-    }
-
-    if (!task.setPeriod(task.start, task.end)) {
-      alert(GanttMaster.messages.GANNT_ERROR_LOADING_DATA_TASK_REMOVED + "\n" + task.name );
-      //remove task from in-memory collection
-      this.tasks.splice(task.getRow(), 1);
-    } else {
-      //append task to editor
-      this.editor.addTask(task, null, true);
-      //append task to gantt
-      this.gantt.addTask(task);
-    }
-  }
-
-  //this.editor.fillEmptyLines();
-  //prof.stop();
-
-  // re-select old row if tasks is not empty
-  if (this.tasks && this.tasks.length > 0) {
-    selectedRow = selectedRow ? selectedRow : 0;
-    this.tasks[selectedRow].rowElement.click();
-  }
-};
-
-
-GanttMaster.prototype.getTask = function (taskId) {
-  var ret;
-  for (var i = 0; i < this.tasks.length; i++) {
-    var tsk = this.tasks[i];
-    if (tsk.id == taskId) {
-      ret = tsk;
-      break;
-    }
-  }
-  return ret;
-};
-
-
-GanttMaster.prototype.getResource = function (resId) {
-  var ret;
-  for (var i = 0; i < this.resources.length; i++) {
-    var res = this.resources[i];
-    if (res.id == resId) {
-      ret = res;
-      break;
-    }
-  }
-  return ret;
-};
-
-
-GanttMaster.prototype.changeTaskDeps = function (task) {
-  return task.moveTo(task.start);
-};
-
-GanttMaster.prototype.changeTaskDates = function (task, start, end) {
-  return task.setPeriod(start, end);
-};
-
-
-GanttMaster.prototype.moveTask = function (task, newStart) {
-  return task.moveTo(newStart, true);
-};
-
-
-GanttMaster.prototype.taskIsChanged = function () {
-  //console.debug("taskIsChanged");
-  var master = this;
-
-  //refresh is executed only once every 50ms
-  this.element.stopTime("gnnttaskIsChanged");
-  //var profilerext = new Profiler("gm_taskIsChangedRequest");
-  this.element.oneTime(50, "gnnttaskIsChanged", function () {
-    //console.debug("task Is Changed real call to redraw");
-    //var profiler = new Profiler("gm_taskIsChangedReal");
-    master.editor.redraw();
-    master.gantt.refreshGantt();
-    master.element.trigger("gantt.refreshGanttCompleted");
-    //profiler.stop();
-  });
-  //profilerext.stop();
-};
-
-
-GanttMaster.prototype.checkButtonPermissions = function () {
-  var ganttButtons=this.element.find(".ganttButtonBar");
-  //hide buttons basing on permissions
-  if (!this.permissions.canWrite)
-    ganttButtons.find(".requireCanWrite").hide();
-
-  if (!this.permissions.canAdd)
-    ganttButtons.find(".requireCanAdd").hide();
-
-  if (!this.permissions.canInOutdent)
-    ganttButtons.find(".requireCanInOutdent").hide();
-
-  if (!this.permissions.canMoveUpDown)
-    ganttButtons.find(".requireCanMoveUpDown").hide();
-
-  if (!this.permissions.canDelete)
-    ganttButtons.find(".requireCanDelete").hide();
-
-  if (!this.permissions.canSeeCriticalPath)
-    ganttButtons.find(".requireCanSeeCriticalPath").hide();
-
-  if (!this.permissions.canAddIssue)
-    ganttButtons.find(".requireCanAddIssue").hide();
-
-};
-
-
-GanttMaster.prototype.redraw = function () {
-  this.editor.redraw();
-  this.gantt.refreshGantt();
-};
-
-GanttMaster.prototype.reset = function () {
-  //console.debug("GanttMaster.prototype.reset");
-  this.tasks = [];
-  this.links = [];
-  this.deletedTaskIds = [];
-  if (!this.__inUndoRedo) {
-    this.__undoStack = [];
-    this.__redoStack = [];
-  } else { // don't reset the stacks if we're in an Undo/Redo, but restart the inUndoRedo control
-    this.__inUndoRedo = false;
-  }
-  delete this.currentTask;
-
-  this.editor.reset();
-  this.gantt.reset();
-};
-
-
-GanttMaster.prototype.showTaskEditor = function (taskId) {
-  var task = this.getTask(taskId);
-  task.rowElement.find(".edit").click();
-};
-
-GanttMaster.prototype.saveProject = function () {
-  return this.saveGantt(false);
-};
-
-GanttMaster.prototype.saveGantt = function (forTransaction) {
-  //var prof = new Profiler("gm_saveGantt");
-  var saved = [];
-  for (var i = 0; i < this.tasks.length; i++) {
-    var task = this.tasks[i];
-    var cloned = task.clone();
-    delete cloned.master;
-    delete cloned.rowElement;
-    delete cloned.ganttElement;
-
-    //shift back to server side timezone
-    if (!forTransaction) {
-      cloned.start -= this.serverClientTimeOffset;
-      cloned.end -= this.serverClientTimeOffset;
-    }
-
-    saved.push(cloned);
-  }
-
-  var ret = {tasks: saved};
-  if (this.currentTask) {
-    ret.selectedRow = this.currentTask.getRow();
-  }
-
-  ret.deletedTaskIds = this.deletedTaskIds;  //this must be consistent with transactions and undo
-
-  if (!forTransaction) {
-    ret.resources = this.resources;
-    ret.roles = this.roles;
-    ret.canWrite = this.permissions.canWrite;
-    ret.canWriteOnParent = this.permissions.canWriteOnParent;
-    ret.zoom = this.gantt.zoom;
-
-    //save collapsed tasks on localStorage
-    this.storeCollapsedTasks();
-
-    //mark un-changed task and assignments
-    this.markUnChangedTasksAndAssignments(ret);
-
-    //si aggiunge il commento al cambiamento di date/status
-    ret.changesReasonWhy=$("#LOG_CHANGES").val();
-
-  }
-
-  //prof.stop();
-  return ret;
-};
-
-
-GanttMaster.prototype.markUnChangedTasksAndAssignments=function(newProject){
-  //console.debug("markUnChangedTasksAndAssignments");
-  //si controlla che ci sia qualcosa di cambiato, ovvero che ci sia l'undo stack
-  if (this.__undoStack.length>0){
-    var oldProject=JSON.parse(ge.__undoStack[0]);
-    //si looppano i "nuovi" task
-    for (var i=0;i<newProject.tasks.length;i++){
-      var newTask=newProject.tasks[i];
-      //se è un task che c'erà già
-      if (typeof (newTask.id)=="String" && !newTask.id.startsWith("tmp_")){
-        //si recupera il vecchio task
-        var oldTask;
-        for (var j=0;j<oldProject.tasks.length;j++){
-          if (oldProject.tasks[j].id==newTask.id){
-            oldTask=oldProject.tasks[j];
-            break;
+      var taskBox = $(this).closest(".taskBoxSVG");
+      var svg = $(self.svg.root());
+      var offs = svg.offset();
+      self.linkOnProgress = true;
+      self.linkFromEnd = $(this).is(".taskLinkEndSVG");
+      svg.addClass("linkOnProgress");
+
+      // create the line
+      var startX = parseFloat(taskBox.attr("x")) + (self.linkFromEnd ? parseFloat(taskBox.attr("width")) : 0);
+      var startY = parseFloat(taskBox.attr("y")) + parseFloat(taskBox.attr("height")) / 2;
+      var line = self.svg.line(startX, startY, e.pageX - offs.left - 5, e.pageY - offs.top - 5, {class:"linkLineSVG"});
+      var circle = self.svg.circle(startX, startY, 5, {class:"linkLineSVG"});
+
+      //bind mousemove to draw a line
+      svg.bind("mousemove.linkSVG", function (e) {
+        var offs = svg.offset();
+        var nx = e.pageX - offs.left;
+        var ny = e.pageY - offs.top;
+        var c = Math.sqrt(Math.pow(nx - startX, 2) + Math.pow(ny - startY, 2));
+        nx = nx - (nx - startX) * 10 / c;
+        ny = ny - (ny - startY) * 10 / c;
+        self.svg.change(line, { x2:nx, y2:ny});
+        self.svg.change(circle, { cx:nx, cy:ny});
+      });
+
+      //bind mouseup un body to stop
+      $("body").one("mouseup.linkSVG", function (e) {
+        $(line).remove();
+        $(circle).remove();
+        self.linkOnProgress = false;
+        svg.removeClass("linkOnProgress");
+
+        $(self.svg.root()).unbind("mousemove.linkSVG");
+        var targetBox = $(e.target).closest(".taskBoxSVG");
+        //console.debug("create link from " + taskBox.attr("taskid") + " to " + targetBox.attr("taskid"));
+
+        if (targetBox && targetBox.attr("taskid") != taskBox.attr("taskid")) {
+          var taskTo;
+          var taskFrom;
+          if (self.linkFromEnd) {
+            taskTo = self.master.getTask(targetBox.attr("taskid"));
+            taskFrom = self.master.getTask(taskBox.attr("taskid"));
+          } else {
+            taskFrom = self.master.getTask(targetBox.attr("taskid"));
+            taskTo = self.master.getTask(taskBox.attr("taskid"));
+          }
+
+          if (taskTo && taskFrom) {
+            var gap = 0;
+            var depInp = taskTo.rowElement.find("[name=depends]");
+            depInp.val(depInp.val() + ((depInp.val() + "").length > 0 ? "," : "") + (taskFrom.getRow() + 1) + (gap != 0 ? ":" + gap : ""));
+            depInp.blur();
           }
         }
-
-        //si controlla se ci sono stati cambiamenti
-        var taskChanged=
-          oldTask.id != newTask.id ||
-          oldTask.code != newTask.code ||
-          oldTask.name != newTask.name ||
-          oldTask.start != newTask.start ||
-          oldTask.startIsMilestone != newTask.startIsMilestone ||
-          oldTask.end != newTask.end ||
-          oldTask.endIsMilestone != newTask.endIsMilestone ||
-          oldTask.duration != newTask.duration ||
-          oldTask.status != newTask.status ||
-          oldTask.typeId != newTask.typeId ||
-          oldTask.relevance != newTask.relevance ||
-          oldTask.progress != newTask.progress ||
-          oldTask.progressByWorklog != newTask.progressByWorklog ||
-          oldTask.description != newTask.description ||
-          oldTask.level != newTask.level||
-          oldTask.depends != newTask.depends;
-
-        newTask.unchanged=!taskChanged;
-
-
-        //se ci sono assegnazioni
-        if (newTask.assigs&&newTask.assigs.length>0){
-
-          //se abbiamo trovato il vecchio task e questo aveva delle assegnazioni
-          if (oldTask && oldTask.assigs && oldTask.assigs.length>0){
-            for (var j=0;j<oldTask.assigs.length;j++){
-              var oldAssig=oldTask.assigs[j];
-              //si cerca la nuova assegnazione corrispondente
-              var newAssig;
-              for (var k=0;k<newTask.assigs.length;k++){
-                if(oldAssig.id==newTask.assigs[k].id){
-                  newAssig=newTask.assigs[k];
-                  break;
-                }
-              }
-
-              //se c'è una nuova assig corrispondente
-              if(newAssig){
-                //si confrontano i valori per vedere se è cambiata
-                newAssig.unchanged=
-                  newAssig.resourceId==oldAssig.resourceId &&
-                  newAssig.roleId==oldAssig.roleId &&
-                  newAssig.effort==oldAssig.effort;
-              }
-            }
-          }
-        }
-      }
-    }
+      })
+    });
   }
-};
-
-
-GanttMaster.prototype.loadCollapsedTasks = function () {
-  var collTasks=[];
-  if (localStorage ) {
-    if (localStorage.getObject("TWPGanttCollTasks"))
-      collTasks = localStorage.getObject("TWPGanttCollTasks");
-  }
-  // IE11 throws an error if not changed the undefined into an array.
-	if (typeof collTasks === "undefined")
-	{
-    collTasks = [];
-	}
-  return collTasks;
-};
-
-GanttMaster.prototype.storeCollapsedTasks = function () {
-  //console.debug("storeCollapsedTasks");
-  if (localStorage) {
-    var collTasks;
-    if (!localStorage.getObject("TWPGanttCollTasks"))
-      collTasks = [];
-    else
-      collTasks = localStorage.getObject("TWPGanttCollTasks");
-
-
-    for (var i = 0; i < this.tasks.length; i++) {
-      var task = this.tasks[i];
-
-      var pos=collTasks.indexOf(task.id);
-      if (task.collapsed){
-        if (pos<0)
-          collTasks.push(task.id);
-      } else {
-        if (pos>=0)
-          collTasks.splice(pos,1);
-      }
-    }
-    localStorage.setObject("TWPGanttCollTasks", collTasks);
-  }
-};
-
-
-
-GanttMaster.prototype.updateLinks = function (task) {
-  //console.debug("updateLinks",task);
-  //var prof= new Profiler("gm_updateLinks");
-
-  // defines isLoop function
-  function isLoop(task, target, visited) {
-    //var prof= new Profiler("gm_isLoop");
-    //console.debug("isLoop :"+task.name+" - "+target.name);
-    if (target == task) {
-      return true;
-    }
-
-    var sups = task.getSuperiors();
-
-    //my parent' superiors are my superiors too
-    var p = task.getParent();
-    while (p) {
-      sups = sups.concat(p.getSuperiors());
-      p = p.getParent();
-    }
-
-    //my children superiors are my superiors too
-    var chs = task.getChildren();
-    for (var i = 0; i < chs.length; i++) {
-      sups = sups.concat(chs[i].getSuperiors());
-    }
-
-    var loop = false;
-    //check superiors
-    for (var i = 0; i < sups.length; i++) {
-      var supLink = sups[i];
-      if (supLink.from == target) {
-        loop = true;
-        break;
-      } else {
-        if (visited.indexOf(supLink.from.id + "x" + target.id) <= 0) {
-          visited.push(supLink.from.id + "x" + target.id);
-          if (isLoop(supLink.from, target, visited)) {
-            loop = true;
-            break;
-          }
-        }
-      }
-    }
-
-    //check target parent
-    var tpar = target.getParent();
-    if (tpar) {
-      if (visited.indexOf(task.id + "x" + tpar.id) <= 0) {
-        visited.push(task.id + "x" + tpar.id);
-        if (isLoop(task, tpar, visited)) {
-          loop = true;
-        }
-      }
-    }
-
-    //prof.stop();
-    return loop;
-  }
-
-  //remove my depends
-  this.links = this.links.filter(function (link) {
-    return link.to != task;
-  });
-
-  var todoOk = true;
-  if (task.depends) {
-
-    //cannot depend from an ancestor
-    var parents = task.getParents();
-    //cannot depend from descendants
-    var descendants = task.getDescendant();
-
-    var deps = task.depends.split(",");
-    var newDepsString = "";
-
-    var visited = [];
-    for (var j = 0; j < deps.length; j++) {
-      var dep = deps[j]; // in the form of row(lag) e.g. 2:3,3:4,5
-      var par = dep.split(":");
-      var lag = 0;
-
-      if (par.length > 1) {
-        lag = parseInt(par[1]);
-      }
-
-      var sup = this.tasks[parseInt(par[0] - 1)];
-
-      if (sup) {
-        if (parents && parents.indexOf(sup) >= 0) {
-          this.setErrorOnTransaction("\""+task.name + "\"\n" + GanttMaster.messages.CANNOT_DEPENDS_ON_ANCESTORS + "\n\"" + sup.name+"\"");
-          todoOk = false;
-
-        } else if (descendants && descendants.indexOf(sup) >= 0) {
-          this.setErrorOnTransaction("\""+task.name + "\"\n" + GanttMaster.messages.CANNOT_DEPENDS_ON_DESCENDANTS + "\n\"" + sup.name+"\"");
-          todoOk = false;
-
-        } else if (isLoop(sup, task, visited)) {
-          todoOk = false;
-          this.setErrorOnTransaction(GanttMaster.messages.CIRCULAR_REFERENCE + "\n\"" + task.name + "\" -> \"" + sup.name+"\"");
-        } else {
-          this.links.push(new Link(sup, task, lag));
-          newDepsString = newDepsString + (newDepsString.length > 0 ? "," : "") + dep;
-        }
-      }
-    }
-
-    task.depends = newDepsString;
-
-  }
+  //ask for redraw link
+  self.redrawLinks();
 
   //prof.stop();
 
-  return todoOk;
-};
 
+  function _createTaskSVG(task, dimensions) {
+    var svg = self.svg;
+    var taskSvg = svg.svg(self.tasksGroup, dimensions.x, dimensions.y, dimensions.width, dimensions.height, {class:"taskBox taskBoxSVG taskStatusSVG", status:task.status, taskid:task.id,fill:task.color||"#eee" });
 
-GanttMaster.prototype.moveUpCurrentTask = function () {
-  var self = this;
-  //console.debug("moveUpCurrentTask",self.currentTask)
-  if (self.currentTask) {
-  if (!self.permissions.canWrite  || !self.currentTask.canWrite || !self.permissions.canMoveUpDown )
-    return;
+    //svg.title(taskSvg, task.name);
+    //external box
+    var layout = svg.rect(taskSvg, 0, 0, "100%", "100%", {class:"taskLayout", rx:"2", ry:"2"});
 
-    self.beginTransaction();
-    self.currentTask.moveUp();
-    self.endTransaction();
-  }
-};
+    //svg.rect(taskSvg, 0, 0, "100%", "100%", {fill:"rgba(255,255,255,.3)"});
 
-GanttMaster.prototype.moveDownCurrentTask = function () {
-  var self = this;
-  //console.debug("moveDownCurrentTask",self.currentTask)
-  if (self.currentTask) {
-  if (!self.permissions.canWrite  || !self.currentTask.canWrite || !self.permissions.canMoveUpDown )
-    return;
+    //external dep
+    if (task.hasExternalDep)
+      svg.rect(taskSvg, 0, 0, "100%", "100%", {fill:"url(#extDep)"});
 
-    self.beginTransaction();
-    self.currentTask.moveDown();
-    self.endTransaction();
-  }
-};
-
-GanttMaster.prototype.outdentCurrentTask = function () {
-  var self = this;
-  if (self.currentTask) {
-  if (!self.permissions.canWrite || !self.currentTask.canWrite  || !self.permissions.canInOutdent)
-    return;
-
-    var par = self.currentTask.getParent();
-
-    self.beginTransaction();
-    self.currentTask.outdent();
-    self.endTransaction();
-
-    //[expand]
-    if (par) self.editor.refreshExpandStatus(par);
-  }
-};
-
-GanttMaster.prototype.indentCurrentTask = function () {
-  var self = this;
-  if (self.currentTask) {
-  if (!self.permissions.canWrite || !self.currentTask.canWrite|| !self.permissions.canInOutdent)
-    return;
-
-    self.beginTransaction();
-    self.currentTask.indent();
-    self.endTransaction();
-  }
-};
-
-GanttMaster.prototype.addBelowCurrentTask = function () {
-  var self = this;
-  if (!self.permissions.canWrite|| !self.permissions.canAdd)
-    return;
-
-  var factory = new TaskFactory();
-  var ch;
-  var row = 0;
-  if (self.currentTask && self.currentTask.name) {
-    ch = factory.build("tmp_" + new Date().getTime(), "", "", self.currentTask.level+ (self.currentTask.isParent()||self.currentTask.level==0?1:0), self.currentTask.start, 1);
-    row = self.currentTask.getRow() + 1;
-
-    if (row>0) {
-      self.beginTransaction();
-      var task = self.addTask(ch, row);
-      if (task) {
-        task.rowElement.click();
-        task.rowElement.find("[name=name]").focus();
+    //progress
+    if (task.progress > 0) {
+      var progress = svg.rect(taskSvg, 0, "20%", (task.progress > 100 ? 100 : task.progress) + "%", "60%", {rx:"2", ry:"2",fill:"rgba(0,0,0,.4)"});
+      if (dimensions.width > 50) {
+        var textStyle = {fill:"#888", "font-size":"10px",class:"textPerc teamworkIcons",transform:"translate(5)"};
+        if (task.progress > 100)
+          textStyle["font-weight"]="bold";
+        if (task.progress > 90)
+          textStyle.transform = "translate(-40)";
+        svg.text(taskSvg, (task.progress > 90 ? 100 : task.progress) + "%", (self.rowHeight-5)/2, (task.progress>100?"!!! ":"")+ task.progress + "%", textStyle);
       }
-      self.endTransaction();
     }
+
+    if (task.hasChild)
+      svg.rect(taskSvg, 0, 0, "100%", 3, {fill:"#000"});
+
+    if (task.startIsMilestone) {
+      svg.image(taskSvg, -9, dimensions.height/2-9, 18, 18, self.master.resourceUrl +"milestone.png")
+    }
+
+    if (task.endIsMilestone) {
+      svg.image(taskSvg, "100%",dimensions.height/2-9, 18, 18, self.master.resourceUrl +"milestone.png", {transform:"translate(-9)"})
+    }
+
+    //task label
+    svg.text(taskSvg, "100%", 18, task.name, {class:"taskLabelSVG", transform:"translate(20,-5)"});
+
+    //link tool
+    if (task.level>0){
+      svg.circle(taskSvg, "0",  dimensions.height/2,dimensions.height/3, {class:"taskLinkStartSVG linkHandleSVG", transform:"translate("+(-dimensions.height/3+1)+")"});
+      svg.circle(taskSvg, "100%",dimensions.height/2,dimensions.height/3, {class:"taskLinkEndSVG linkHandleSVG", transform:"translate("+(dimensions.height/3-1)+")"});
+    }
+    return taskSvg
   }
+
 };
 
-GanttMaster.prototype.addAboveCurrentTask = function () {
+
+Ganttalendar.prototype.addTask = function (task) {
+  //set new boundaries for gantt
+  this.originalEndMillis = this.originalEndMillis > task.end ? this.originalEndMillis : task.end;
+  this.originalStartMillis = this.originalStartMillis < task.start ? this.originalStartMillis : task.start;
+};
+
+
+//<%-------------------------------------- GANT DRAW LINK SVG ELEMENT --------------------------------------%>
+//'from' and 'to' are tasks already drawn
+Ganttalendar.prototype.drawLink = function (from, to, type) {
   var self = this;
-  if (!self.permissions.canWrite || !self.permissions.canAdd)
-    return;
-  var factory = new TaskFactory();
+  //console.debug("drawLink")
+  var peduncolusSize = 10;
 
-  var ch;
-  var row = 0;
-  if (self.currentTask  && self.currentTask.name) {
-    //cannot add brothers to root
-    if (self.currentTask.level <= 0)
-      return;
-
-    ch = factory.build("tmp_" + new Date().getTime(), "", "", self.currentTask.level, self.currentTask.start, 1);
-    row = self.currentTask.getRow();
-
-    if (row > 0) {
-      self.beginTransaction();
-      var task = self.addTask(ch, row);
-      if (task) {
-        task.rowElement.click();
-        task.rowElement.find("[name=name]").focus();
-      }
-      self.endTransaction();
-    }
-  }
-};
-
-GanttMaster.prototype.deleteCurrentTask = function () {
-  //console.debug("deleteCurrentTask",this.currentTask , this.isMultiRoot)
-  var self = this;
-  if (!self.currentTask || !self.permissions.canDelete && !self.currentTask.canDelete)
-    return;
-  var row = self.currentTask.getRow();
-  if (self.currentTask && (row > 0 || self.isMultiRoot || self.currentTask.isNew()) ) {
-    var par = self.currentTask.getParent();
-    self.beginTransaction();
-    self.currentTask.deleteTask();
-    self.currentTask = undefined;
-
-    //recompute depends string
-    self.updateDependsStrings();
-
-    //redraw
-    self.redraw();
-
-    //[expand]
-    if (par) self.editor.refreshExpandStatus(par);
-
-
-    //focus next row
-    row = row > self.tasks.length - 1 ? self.tasks.length - 1 : row;
-    if (row >= 0) {
-      self.currentTask = self.tasks[row];
-      self.currentTask.rowElement.click();
-      self.currentTask.rowElement.find("[name=name]").focus();
-    }
-    self.endTransaction();
-  }
-};
-
-
-
-
-GanttMaster.prototype.collapseAll = function () {
-  //console.debug("collapseAll");
-  if (this.currentTask){
-    this.currentTask.collapsed=true;
-    var desc = this.currentTask.getDescendant();
-    for (var i=0; i<desc.length; i++) {
-      if (desc[i].isParent()) // set collapsed only if is a parent
-        desc[i].collapsed = true;
-      desc[i].rowElement.hide();
-    }
-
-    this.redraw();
-
-    //store collapse statuses
-    this.storeCollapsedTasks();
-  }
-};
-
-GanttMaster.prototype.fullScreen = function () {
-  //console.debug("fullScreen");
-  this.workSpace.toggleClass("ganttFullScreen").resize();
-  $("#fullscrbtn .teamworkIcon").html(this.workSpace.is(".ganttFullScreen")?"€":"@");
-};
-
-
-GanttMaster.prototype.expandAll = function () {
-  //console.debug("expandAll");
-  if (this.currentTask){
-    this.currentTask.collapsed=false;
-    var desc = this.currentTask.getDescendant();
-    for (var i=0; i<desc.length; i++) {
-      desc[i].collapsed = false;
-      desc[i].rowElement.show();
-    }
-
-    this.redraw();
-
-    //store collapse statuses
-    this.storeCollapsedTasks();
-
-  }
-};
-
-
-
-GanttMaster.prototype.collapse = function (task, all) {
-  //console.debug("collapse",task)
-  task.collapsed=true;
-  task.rowElement.addClass("collapsed");
-
-  var descs = task.getDescendant();
-  for (var i = 0; i < descs.length; i++)
-    descs[i].rowElement.hide();
-
-
-  this.gantt.refreshGantt();
-
-  //store collapse statuses
-  this.storeCollapsedTasks();
-
-};
-
-
-GanttMaster.prototype.expand = function (task,all) {
-  //console.debug("expand",task)
-  task.collapsed=false;
-  task.rowElement.removeClass("collapsed");
-
-  var collapsedDescendant = this.getCollapsedDescendant();
-  var descs = task.getDescendant();
-  for (var i = 0; i < descs.length; i++) {
-    var childTask = descs[i];
-    if (collapsedDescendant.indexOf(childTask) >= 0) continue;
-    childTask.rowElement.show();
-  }
-
-  this.gantt.refreshGantt();
-
-  //store collapse statuses
-  this.storeCollapsedTasks();
-
-};
-
-
-GanttMaster.prototype.getCollapsedDescendant = function () {
-  var allTasks = this.tasks;
-  var collapsedDescendant = [];
-  for (var i = 0; i < allTasks.length; i++) {
-    var task = allTasks[i];
-    if (collapsedDescendant.indexOf(task) >= 0) continue;
-    if (task.collapsed) collapsedDescendant = collapsedDescendant.concat(task.getDescendant());
-  }
-  return collapsedDescendant;
-}
-
-
-
-
-GanttMaster.prototype.addIssue = function () {
-  var self = this;
-
-  if (self.currentTask && self.currentTask.isNew()){
-    alert(GanttMaster.messages.PLEASE_SAVE_PROJECT);
-    return;
-  }
-  if (!self.currentTask || !self.currentTask.canAddIssue)
-    return;
-
-  openIssueEditorInBlack('0',"AD","ISSUE_TASK="+self.currentTask.id);
-};
-
-GanttMaster.prototype.openExternalEditor = function () {
-  //console.debug("openExternalEditor ")
-  var self = this;
-  if (!self.currentTask)
-    return;
-
-  if (self.currentTask.isNew()){
-    alert(GanttMaster.messages.PLEASE_SAVE_PROJECT);
-    return;
-  }
-
-  //window.location.href=contextPath+"/applications/teamwork/task/taskEditor.jsp?CM=ED&OBJID="+self.currentTask.id;
-};
-
-//<%----------------------------- TRANSACTION MANAGEMENT ---------------------------------%>
-GanttMaster.prototype.beginTransaction = function () {
-  if (!this.__currentTransaction) {
-    this.__currentTransaction = {
-      snapshot: JSON.stringify(this.saveGantt(true)),
-      errors:   []
+  /**
+   * Given an item, extract its rendered position
+   * width and height into a structure.
+   */
+  function buildRect(item) {
+    var p = item.ganttElement.position();
+    var rect = {
+      left:  parseFloat(item.ganttElement.attr("x")),
+      top:   parseFloat(item.ganttElement.attr("y")),
+      width: parseFloat(item.ganttElement.attr("width")),
+      height:parseFloat(item.ganttElement.attr("height"))
     };
-  } else {
-    console.error("Cannot open twice a transaction");
-  }
-  return this.__currentTransaction;
-};
-
-
-//this function notify an error to a transaction -> transaction will rollback
-GanttMaster.prototype.setErrorOnTransaction = function (errorMessage, task) {
-  if (this.__currentTransaction) {
-    this.__currentTransaction.errors.push({msg: errorMessage, task: task});
-  } else {
-    console.error(errorMessage);
-  }
-};
-
-GanttMaster.prototype.isTransactionInError = function () {
-  if (!this.__currentTransaction) {
-    console.error("Transaction never started.");
-    return true;
-  } else {
-    return this.__currentTransaction.errors.length > 0
+    return rect;
   }
 
-};
+  /**
+   * The default rendering method, which paints a start to end dependency.
+   */
+  function drawStartToEnd(from, to, ps) {
+    var svg = self.svg;
 
-GanttMaster.prototype.endTransaction = function () {
-  if (!this.__currentTransaction) {
-    console.error("Transaction never started.");
-    return true;
-  }
+    //this function update an existing link
+    function update() {
+      var group = $(this);
+      var from = group.data("from");
+      var to = group.data("to");
 
-  var ret = true;
+      var rectFrom = buildRect(from);
+      var rectTo = buildRect(to);
 
-  //no error -> commit
-  if (this.__currentTransaction.errors.length <= 0) {
-    //console.debug("committing transaction");
+      var fx1 = rectFrom.left;
+      var fx2 = rectFrom.left + rectFrom.width;
+      var fy = rectFrom.height / 2 + rectFrom.top;
 
-    //put snapshot in undo
-    this.__undoStack.push(this.__currentTransaction.snapshot);
-    //clear redo stack
-    this.__redoStack = [];
+      var tx1 = rectTo.left;
+      var tx2 = rectTo.left + rectTo.width;
+      var ty = rectTo.height / 2 + rectTo.top;
 
-    //shrink gantt bundaries
-    this.gantt.originalStartMillis = Infinity;
-    this.gantt.originalEndMillis = -Infinity;
-    for (var i = 0; i < this.tasks.length; i++) {
-      var task = this.tasks[i];
-      if (this.gantt.originalStartMillis > task.start)
-        this.gantt.originalStartMillis = task.start;
-      if (this.gantt.originalEndMillis < task.end)
-        this.gantt.originalEndMillis = task.end;
 
+      var tooClose = tx1 < fx2 + 2 * ps;
+      var r = 5; //radius
+      var arrowOffset = 5;
+      var up = fy > ty;
+      var fup = up ? -1 : 1;
+
+      var prev = fx2 + 2 * ps > tx1;
+      var fprev = prev ? -1 : 1;
+
+      var image = group.find("image");
+      var p = svg.createPath();
+
+      if (tooClose) {
+        var firstLine = fup * (rectFrom.height / 2 - 2 * r + 2);
+        p.move(fx2, fy)
+          .line(ps, 0, true)
+          .arc(r, r, 90, false, !up, r, fup * r, true)
+          .line(0, firstLine, true)
+          .arc(r, r, 90, false, !up, -r, fup * r, true)
+          .line(fprev * 2 * ps + (tx1 - fx2), 0, true)
+          .arc(r, r, 90, false, up, -r, fup * r, true)
+          .line(0, (Math.abs(ty - fy) - 4 * r - Math.abs(firstLine)) * fup - arrowOffset, true)
+          .arc(r, r, 90, false, up, r, fup * r, true)
+          .line(ps, 0, true);
+        image.attr({x:tx1 - 5, y:ty - 5 - arrowOffset});
+
+      } else {
+        p.move(fx2, fy)
+          .line((tx1 - fx2) / 2 - r, 0, true)
+          .arc(r, r, 90, false, !up, r, fup * r, true)
+          .line(0, ty - fy - fup * 2 * r + arrowOffset, true)
+          .arc(r, r, 90, false, up, r, fup * r, true)
+          .line((tx1 - fx2) / 2 - r, 0, true);
+        image.attr({x:tx1 - 5, y:ty - 5 + arrowOffset});
+      }
+
+      group.find("path").attr({d:p.path()});
     }
-    this.taskIsChanged(); //enqueue for gantt refresh
 
 
-    //error -> rollback
-  } else {
-    ret = false;
-    //console.debug("rolling-back transaction");
+    // create the group
+    var group = svg.group(self.linksGroup, "" + from.id + "-" + to.id);
+    svg.title(group, from.name + " -> " + to.name);
 
-    //compose error message
-    var msg = "ERROR:\n";
-    for (var i = 0; i < this.__currentTransaction.errors.length; i++) {
-      var err = this.__currentTransaction.errors[i];
-      msg = msg + err.msg + "\n\n";
-    }
-    alert(msg);
+    var p = svg.createPath();
 
+    //add the arrow
+    svg.image(group, 0, 0, 5, 10, self.master.resourceUrl +"linkArrow.png");
+    //create empty path
+    svg.path(group, p, {class:"taskLinkPathSVG"});
 
-    //try to restore changed tasks
-    var oldTasks = JSON.parse(this.__currentTransaction.snapshot);
-    this.deletedTaskIds = oldTasks.deletedTaskIds;
-    this.__inUndoRedo = true; // avoid Undo/Redo stacks reset
-    this.loadTasks(oldTasks.tasks, oldTasks.selectedRow);
-    this.redraw();
+    //set "from" and "to" to the group, bind "update" and trigger it
+    var jqGroup = $(group).data({from:from, to:to }).attr({from:from.id, to:to.id}).on("update", update).trigger("update");
 
+    if (self.showCriticalPath && from.isCritical && to.isCritical)
+      jqGroup.addClass("critical");
+
+    jqGroup.addClass("linkGroup");
+    return jqGroup;
   }
-  //reset transaction
-  this.__currentTransaction = undefined;
 
-  //show/hide save button
-  this.saveRequired();
 
+  /**
+   * A rendering method which paints a start to start dependency.
+   */
+  function drawStartToStart(from, to) {
+    console.error("StartToStart not supported on SVG");
+    var rectFrom = buildRect(from);
+    var rectTo = buildRect(to);
+  }
+
+  var link;
+  // Dispatch to the correct renderer
+  if (type == 'start-to-start') {
+    link = drawStartToStart(from, to, peduncolusSize);
+  } else {
+    link = drawStartToEnd(from, to, peduncolusSize);
+  }
+
+  if (this.master.permissions.canWrite && (from.canWrite || to.canWrite)) {
+    link.click(function (e) {
+      var el = $(this);
+      e.stopPropagation();// to avoid body remove focused
+      self.element.find("[class*=focused]").removeClass("focused");
+      $(".ganttSVGBox .focused").removeClass("focused");
+      var el = $(this);
+      if (!self.resDrop)
+        el.addClass("focused");
+      self.resDrop = false; //hack to avoid select
+
+      $("body").off("click.focused").one("click.focused", function () {
+        $(".ganttSVGBox .focused").removeClass("focused");
+      })
+
+    });
+  }
+
+
+};
+
+Ganttalendar.prototype.redrawLinks = function () {
+  //console.debug("redrawLinks ");
+  var self = this;
+  this.element.stopTime("ganttlnksredr");
+  this.element.oneTime(60, "ganttlnksredr", function () {
+
+    //var prof=new Profiler("gd_drawLink_real");
+
+    //remove all links
+    $("#linksSVG").empty();
+
+    var collapsedDescendant = [];
+
+    //[expand]
+    var collapsedDescendant = self.master.getCollapsedDescendant();
+    for (var i = 0; i < self.master.links.length; i++) {
+      var link = self.master.links[i];
+
+      if (collapsedDescendant.indexOf(link.from) >= 0 || collapsedDescendant.indexOf(link.to) >= 0) continue;
+
+      self.drawLink(link.from, link.to);
+    }
+    //prof.stop();
+  });
+};
+
+
+Ganttalendar.prototype.reset = function () {
+  this.element.find("[class*=linkGroup]").remove();
+  this.element.find("[taskid]").remove();
+};
+
+
+Ganttalendar.prototype.redrawTasks = function () {
   //[expand]
-  this.editor.refreshExpandStatus(this.currentTask);
-
-  return ret;
-};
-
-// inhibit undo-redo
-GanttMaster.prototype.checkpoint = function () {
-  //console.debug("GanttMaster.prototype.checkpoint");
-  this.__undoStack = [];
-  this.__redoStack = [];
-  this.saveRequired();
-};
-
-//----------------------------- UNDO/REDO MANAGEMENT ---------------------------------%>
-
-GanttMaster.prototype.undo = function () {
-  //console.debug("undo before:",this.__undoStack,this.__redoStack);
-  if (this.__undoStack.length > 0) {
-    var his = this.__undoStack.pop();
-    this.__redoStack.push(JSON.stringify(this.saveGantt()));
-    var oldTasks = JSON.parse(his);
-    this.deletedTaskIds = oldTasks.deletedTaskIds;
-    this.__inUndoRedo = true; // avoid Undo/Redo stacks reset
-    this.loadTasks(oldTasks.tasks, oldTasks.selectedRow);
-    //console.debug(oldTasks,oldTasks.deletedTaskIds)
-    this.redraw();
-    //show/hide save button
-    this.saveRequired();
-
-    //console.debug("undo after:",this.__undoStack,this.__redoStack);
+  //var prof = new Profiler("ganttRedrawTasks");
+  var collapsedDescendant = this.master.getCollapsedDescendant();
+  for (var i = 0; i < this.master.tasks.length; i++) {
+    var task = this.master.tasks[i];
+    if (collapsedDescendant.indexOf(task) >= 0) continue;
+    this.drawTask(task);
   }
+  //prof.stop();
 };
 
-GanttMaster.prototype.redo = function () {
-  //console.debug("redo before:",undoStack,redoStack);
-  if (this.__redoStack.length > 0) {
-    var his = this.__redoStack.pop();
-    this.__undoStack.push(JSON.stringify(this.saveGantt()));
-    var oldTasks = JSON.parse(his);
-    this.deletedTaskIds = oldTasks.deletedTaskIds;
-    this.__inUndoRedo = true; // avoid Undo/Redo stacks reset
-    this.loadTasks(oldTasks.tasks, oldTasks.selectedRow);
-    this.redraw();
-    //console.debug("redo after:",undoStack,redoStack);
 
-    this.saveRequired();
+Ganttalendar.prototype.refreshGantt = function () {
+  //console.debug("refreshGantt")
+
+  if (this.showCriticalPath) {
+    this.master.computeCriticalPath();
   }
+
+
+  var par = this.element.parent();
+
+  //try to maintain last scroll
+  var scrollY = par.scrollTop();
+  var scrollX = par.scrollLeft();
+
+  this.element.remove();
+  //guess the zoom level in base of period
+  if (!this.zoom) {
+    var days = Math.round((this.originalEndMillis - this.originalStartMillis) / (3600000 * 24));
+    //"d", "w","w2","w3", "m","m2", "q", "s", "y"
+    this.zoom = this.zoomLevels[days < 2 ? 0 : (days < 15 ? 1 : (days < 30 ? 2 : (days < 45 ? 3 : (days < 60 ? 4 : (days < 90 ? 5 : (days < 180 ? 6 : (days < 600 ? 7 : 8  )  )  )  ) ) ) )];
+  }
+  var domEl = this.create(this.zoom, this.originalStartMillis, this.originalEndMillis);
+  this.element = domEl;
+  par.append(domEl);
+  this.redrawTasks();
+
+  //set old scroll  
+  //console.debug("old scroll:",scrollX,scrollY)
+  par.scrollTop(scrollY);
+  par.scrollLeft(scrollX);
+
+  //set current task
+  this.synchHighlight();
+
 };
 
 
-GanttMaster.prototype.saveRequired = function () {
-  //console.debug("saveRequired")
-  //show/hide save button
-  if(this.__undoStack.length>0 && this.permissions.canWrite) {
-    $("#saveGanttButton").removeClass("disabled");
-    $("form[alertOnChange] #Gantt").val(new Date().getTime()); // set a fake variable as dirty
-    this.element.trigger("saveRequired.gantt",[true]);
+Ganttalendar.prototype.fitGantt = function () {
+  delete this.zoom;
+  this.refreshGantt();
+};
 
-
+Ganttalendar.prototype.synchHighlight = function () {
+  //console.debug("synchHighlight",this.master.currentTask);
+  if (this.master.currentTask ){
+    // take care of collapsed rows
+    var ganttHighLighterPosition=this.master.editor.element.find("[class*=taskEditRow]:visible").index(this.master.currentTask.rowElement);
+    this.master.gantt.element.find("[class*=ganttLinesSVG]").removeClass("rowSelected").eq(ganttHighLighterPosition).addClass("rowSelected");
   } else {
-    $("#saveGanttButton").addClass("disabled");
-    $("form[alertOnChange] #Gantt").updateOldValue(); // set a fake variable as clean
-    this.element.trigger("saveRequired.gantt",[false]);
-
+    $(".rowSelected").removeClass("rowSelected"); // todo non c'era
   }
 };
 
 
-GanttMaster.prototype.resize = function () {
-  //console.debug("GanttMaster.resize")
-  this.splitter.resize();
+Ganttalendar.prototype.getCenterMillis= function () {
+  return parseInt((this.element.parent().scrollLeft()+this.element.parent().width()/2)/this.fx+this.startMillis);
 };
 
+Ganttalendar.prototype.goToMillis= function (millis) {
+  var x = Math.round(((millis) - this.startMillis) * this.fx) -this.element.parent().width()/2;
+  this.element.parent().scrollLeft(x);
+};
+
+Ganttalendar.prototype.centerOnToday = function () {
+  this.goToMillis(new Date().getTime());
+};
 
 
 /**
- * Compute the critical path using Backflow algorithm.
- * Translated from Java code supplied by M. Jessup here http://stackoverflow.com/questions/2985317/critical-path-method-algorithm
- *
- * For each task computes:
- * earlyStart, earlyFinish, latestStart, latestFinish, criticalCost
- *
- * A task on the critical path has isCritical=true
- * A task not in critical path can float by latestStart-earlyStart days
- *
- * If you use critical path avoid usage of dependencies between different levels of tasks
- *
- * WARNNG: It ignore milestones!!!!
+ * Allows drag and drop and extesion of task boxes. Only works on x axis
+ * @param opt
  * @return {*}
  */
-GanttMaster.prototype.computeCriticalPath = function () {
+$.fn.dragExtedSVG = function (svg, opt) {
 
-  if (!this.tasks)
-    return false;
+  //doing this can work with one svg at once only
+  var target;
+  var svgX;
+  var offsetMouseRect;
 
-  // do not consider grouping tasks
-  var tasks = this.tasks.filter(function (t) {
-    //return !t.isParent()
-    return (t.getRow() > 0) && (!t.isParent() || (t.isParent() && !t.isDependent()));
-  });
+  var options = {
+    canDrag:        true,
+    canResize:      true,
+    resizeZoneWidth:10,
+    minSize:        10,
+    startDrag:      function (e) {},
+    drag:           function (e) {},
+    drop:           function (e) {},
+    startResize:    function (e) {},
+    resize:         function (e) {},
+    stopResize:     function (e) {}
+  };
 
-  // reset values
-  for (var i = 0; i < tasks.length; i++) {
-    var t = tasks[i];
-    t.earlyStart = -1;
-    t.earlyFinish = -1;
-    t.latestStart = -1;
-    t.latestFinish = -1;
-    t.criticalCost = -1;
-    t.isCritical = false;
-  }
+  $.extend(options, opt);
 
-  // tasks whose critical cost has been calculated
-  var completed = [];
-  // tasks whose critical cost needs to be calculated
-  var remaining = tasks.concat(); // put all tasks in remaining
+  this.each(function () {
+    var el = $(this);
+    svgX = svg.parent().offset().left; //parent is used instead of svg for a Firefox oddity
+    if (options.canDrag)
+      el.addClass("deSVGdrag");
+
+    if (options.canResize || options.canDrag) {
+      el.bind("mousedown.deSVG",function (e) {
+          //console.debug("mousedown.deSVG");
+          if ($(e.target).is("image")) {
+            e.preventDefault();
+          }
+
+          target = $(this);
+          var x1 = parseFloat(el.find("[class*=taskLayout]").offset().left);
+          var x2 = x1 + parseFloat(el.attr("width"));
+          var posx = e.pageX;
+
+          $("body").unselectable();
+
+          //start resize end
+          if (options.canResize && (x2-x1)>3*options.resizeZoneWidth && (posx<=x2 &&  posx >= x2- options.resizeZoneWidth)) {
+            //store offset mouse x2
+            offsetMouseRect = x2 - e.pageX;
+            target.attr("oldw", target.attr("width"));
+
+            var one = true;
+
+            //bind event for start resizing
+            $(svg).bind("mousemove.deSVG", function (e) {
+
+              if (one) {
+                //trigger startResize
+                options.startResize.call(target.get(0), e);
+                one = false;
+              }
+
+              //manage resizing
+              var nW =  e.pageX - x1 + offsetMouseRect;
+
+              target.attr("width", nW < options.minSize ? options.minSize : nW);
+              //callback
+              options.resize.call(target.get(0), e);
+            });
+
+            //bind mouse up on body to stop resizing
+            $("body").one("mouseup.deSVG", stopResize);
 
 
-  // Backflow algorithm
-  // while there are tasks whose critical cost isn't calculated.
-  while (remaining.length > 0) {
-    var progress = false;
+          //start resize start
+          } else  if (options.canResize && (x2-x1)>3*options.resizeZoneWidth && (posx>=x1 && posx<=x1+options.resizeZoneWidth)) {
+            //store offset mouse x1
+            offsetMouseRect = parseFloat(target.attr("x"));
+            target.attr("oldw", target.attr("width")); //todo controllare se è ancora usato oldw
 
-    // find a new task to calculate
-    for (var i = 0; i < remaining.length; i++) {
-      var task = remaining[i];
-      var inferiorTasks = task.getInferiorTasks();
+            var one = true;
 
-      if (containsAll(completed, inferiorTasks)) {
-        // all dependencies calculated, critical cost is max dependency critical cost, plus our cost
-        var critical = 0;
-        for (var j = 0; j < inferiorTasks.length; j++) {
-          var t = inferiorTasks[j];
-          if (t.criticalCost > critical) {
-            critical = t.criticalCost;
+            //bind event for start resizing
+            $(svg).bind("mousemove.deSVG", function (e) {
+
+              if (one) {
+                //trigger startResize
+                options.startResize.call(target.get(0), e);
+                one = false;
+              }
+
+              //manage resizing
+              var nx1= offsetMouseRect-(posx-e.pageX);
+              var nW = (x2-x1) + (posx-e.pageX);
+              nW=nW < options.minSize ? options.minSize : nW;
+              target.attr("x",nx1);
+              target.attr("width", nW);
+              //callback
+              options.resize.call(target.get(0), e);
+            });
+
+            //bind mouse up on body to stop resizing
+            $("body").one("mouseup.deSVG", stopResize);
+
+
+
+            // start drag
+          } else if (options.canDrag) {
+            //store offset mouse x1
+            offsetMouseRect = parseFloat(target.attr("x")) - e.pageX;
+            target.attr("oldx", target.attr("x"));
+
+            var one = true;
+            //bind event for start dragging
+            $(svg).bind("mousemove.deSVG",function (e) {
+              if (one) {
+                //trigger startDrag
+                options.startDrag.call(target.get(0), e);
+                one = false;
+              }
+
+              //manage resizing
+              target.attr("x", offsetMouseRect + e.pageX);
+              //callback
+              options.drag.call(target.get(0), e);
+
+            }).bind("mouseleave.deSVG", drop);
+
+            //bind mouse up on body to stop resizing
+            $("body").one("mouseup.deSVG", drop);
+
           }
         }
-        task.criticalCost = critical + task.duration;
-        // set task as calculated an remove
-        completed.push(task);
-        remaining.splice(i, 1);
 
-        // note we are making progress
-        progress = true;
-      }
+      ).bind("mousemove.deSVG",
+        function (e) {
+          var el = $(this);
+          var x1 = el.find("[class*=taskLayout]").offset().left;
+          var x2 = x1 + parseFloat(el.attr("width"));
+          var posx = e.pageX;
+
+          //set cursor handle
+          if (options.canResize && (x2-x1)>3*options.resizeZoneWidth &&((posx<=x2 &&  posx >= x2- options.resizeZoneWidth) || (posx>=x1 && posx<=x1+options.resizeZoneWidth))) {
+            el.addClass("deSVGhand");
+          } else {
+            el.removeClass("deSVGhand");
+          }
+        }
+
+      ).addClass("deSVG");
     }
-    // If we haven't made any progress then a cycle must exist in
-    // the graph and we wont be able to calculate the critical path
-    if (!progress) {
-      console.error("Cyclic dependency, algorithm stopped!");
-      return false;
-    }
+  });
+  return this;
+
+
+  function stopResize(e) {
+    $(svg).unbind("mousemove.deSVG").unbind("mouseup.deSVG").unbind("mouseleave.deSVG");
+    if (target && target.attr("oldw")!=target.attr("width"))
+      options.stopResize.call(target.get(0), e); //callback
+    target = undefined;
+    $("body").clearUnselectable();
   }
 
-  // set earlyStart, earlyFinish, latestStart, latestFinish
-  computeMaxCost(tasks);
-  var initialNodes = initials(tasks);
-  calculateEarly(initialNodes);
-  calculateCritical(tasks);
-
-  return tasks;
-
-
-  function containsAll(set, targets) {
-    for (var i = 0; i < targets.length; i++) {
-      if (set.indexOf(targets[i]) < 0)
-        return false;
-    }
-    return true;
-  }
-
-  function computeMaxCost(tasks) {
-    var max = -1;
-    for (var i = 0; i < tasks.length; i++) {
-      var t = tasks[i];
-
-      if (t.criticalCost > max)
-        max = t.criticalCost;
-    }
-    //console.debug("Critical path length (cost): " + max);
-    for (var i = 0; i < tasks.length; i++) {
-      var t = tasks[i];
-      t.setLatest(max);
-    }
-  }
-
-  function initials(tasks) {
-    var initials = [];
-    for (var i = 0; i < tasks.length; i++) {
-      if (!tasks[i].depends || tasks[i].depends == "")
-        initials.push(tasks[i]);
-    }
-    return initials;
-  }
-
-  function calculateEarly(initials) {
-    for (var i = 0; i < initials.length; i++) {
-      var initial = initials[i];
-      initial.earlyStart = 0;
-      initial.earlyFinish = initial.duration;
-      setEarly(initial);
-    }
-  }
-
-  function setEarly(initial) {
-    var completionTime = initial.earlyFinish;
-    var inferiorTasks = initial.getInferiorTasks();
-    for (var i = 0; i < inferiorTasks.length; i++) {
-      var t = inferiorTasks[i];
-      if (completionTime >= t.earlyStart) {
-        t.earlyStart = completionTime;
-        t.earlyFinish = completionTime + t.duration;
-      }
-      setEarly(t);
-    }
-  }
-
-  function calculateCritical(tasks) {
-    for (var i = 0; i < tasks.length; i++) {
-      var t = tasks[i];
-      t.isCritical = (t.earlyStart == t.latestStart)
-    }
+  function drop(e) {
+    $(svg).unbind("mousemove.deSVG").unbind("mouseup.deSVG").unbind("mouseleave.deSVG");
+    if (target && target.attr("oldx") != target.attr("x"))
+      options.drop.call(target.get(0), e); //callback
+    target = undefined;
+    $("body").clearUnselectable();
   }
 
 };
-
-//------------------------------------------- MANAGE CHANGE LOG INPUT ---------------------------------------------------
-GanttMaster.prototype.manageSaveRequired=function(ev, showSave) {
-  //console.debug("manageSaveRequired", showSave);
-
-  function checkChanges() {
-    var changes = false;
-    //there is somethin in the redo stack?
-    if (ge.__undoStack.length > 0) {
-      var oldProject = JSON.parse(ge.__undoStack[0]);
-      //si looppano i "nuovi" task
-      for (var i = 0; !changes && i < ge.tasks.length; i++) {
-        var newTask = ge.tasks[i];
-        //se è un task che c'erà già
-        if (!(""+newTask.id).startsWith("tmp_")) {
-          //si recupera il vecchio task
-          var oldTask;
-          for (var j = 0; j < oldProject.tasks.length; j++) {
-            if (oldProject.tasks[j].id == newTask.id) {
-              oldTask = oldProject.tasks[j];
-              break;
-            }
-          }
-          // chack only status or dateChanges
-          if (oldTask && (oldTask.status != newTask.status || oldTask.start != newTask.start || oldTask.end != newTask.end)) {
-            changes = true;
-            break;
-          }
-        }
-      }
-    }
-    $("#LOG_CHANGES_CONTAINER").css("display", changes ? "inline-block" : "none");
-  }
-
-
-  if (showSave) {
-    $("body").stopTime("gantt.manageSaveRequired").oneTime(200, "gantt.manageSaveRequired", checkChanges);
-  } else {
-    $("#LOG_CHANGES_CONTAINER").hide();
-  }
-
-}
